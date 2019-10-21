@@ -1,0 +1,4 @@
+*.pth
+runs/
+__pycache__/
+
