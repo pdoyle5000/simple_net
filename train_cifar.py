@@ -7,10 +7,12 @@ from simple_net import SimpleNet
 from torch.utils.data import Dataset
 from torch.utils.tensorboard import SummaryWriter
 import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from torchvision import transforms
+import pickle
 
 transform_train = transforms.Compose([
     transforms.RandomCrop(32, padding=4),
@@ -42,14 +44,14 @@ class CifarDataset(Dataset):
         img = self.norm(img)
 
         labels = np.array(self.labels[idx]).astype(np.double)
-        return img, labels
+        return img, labels, self.paths[idx]
 
 def _get_dataset_loader(data, transform=None, shuffle=False):
     return torch.utils.data.DataLoader(
-            CifarDataset(data, transform=transform), batch_size=64, shuffle=shuffle, num_workers=8)
+            CifarDataset(data, transform=transform), batch_size=32, shuffle=shuffle, num_workers=8)
 
 def main(data_path, model_name):
-    output_model = model_name + ".pth"
+    output_model = "models/" + model_name + ".pth"
     with open(data_path) as f:
         data = json.load(f)
 
@@ -67,19 +69,11 @@ def main(data_path, model_name):
     net = SimpleNet(10).cuda()
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(net.parameters(), lr=1e-3, momentum=0.9, weight_decay=5e-4)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=.1)
-    
-    print("training...")
+    scheduler = ReduceLROnPlateau(optimizer, mode="max", verbose=True, patience=10)
     train_iter = 0
-    for epoch in range(600):
-        
-        if epoch == 250 or epoch == 350 or epoch == 500:
-            scheduler.step()
-            print(f"LR Stepped to: {scheduler.get_lr()}")
-
+    for epoch in range(400):
         running_loss = 0.0
-
-        for i, (inputs, labels) in enumerate(train_dataset_loader):
+        for i, (inputs, labels, paths) in enumerate(train_dataset_loader):
             optimizer.zero_grad()
             outputs = net(inputs.float().cuda())
             loss = criterion(outputs, labels.long().cuda())
@@ -87,35 +81,42 @@ def main(data_path, model_name):
             optimizer.step()
 
             running_loss += loss.item()
-            if (i) % 100 == 0:
+            if i > 0 and (i) % 100 == 0:
                 print('[%d, %5d] loss %.3f' % (epoch, i, running_loss / 100))
                 writer.add_scalar("TrainLoss", (running_loss / 100), train_iter)
                 train_iter += 1
                 running_loss = 0.0
 
         # Test
-        if epoch + 1 % 10:
-            print("testing...")
+        if epoch % 5 == 0:  #change this back
             with torch.no_grad():
                 correct = 0.0
                 total = 0.0
                 i = 0.0
-                for inputs, labels in test_dataset_loader:
+                all_labels = []
+                all_preds = []
+                all_paths = []
+                for inputs, labels, paths in test_dataset_loader:
                     outputs = net(inputs.float().cuda())
                     _, predicted = outputs.max(1)
                     total += labels.size(0)
                     correct += predicted.eq(labels.long().cuda()).sum().item()
                     i += 1
+                    all_labels.append(labels)
+                    all_preds.append(predicted)
+                    all_paths.append(paths)
                 test_accuracy = correct / total
             print(f"Test Accuracy: {test_accuracy}")
             writer.add_scalar("TestAccuracy", test_accuracy, epoch)
             print(f"Correct: {correct}, Incorrect: {total-correct}")
-            # generate and plot ROC true-pos vs false-pos.
-            # print what predicted looks like, create confusion matrix.
+            scheduler.step(test_accuracy)
     
     # Save
     print("saving...")
     torch.save(net.state_dict(), output_model)
+
+    # Pickle final test data
+    pickle.dump({"labels": all_labels, "preds": all_preds, "paths": all_paths}, open(output_model + ".preds.pkl", "wb"))
 
 
 if __name__ == '__main__':
